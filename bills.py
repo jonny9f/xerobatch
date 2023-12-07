@@ -31,6 +31,10 @@ REDIRECT_URI = 'http://localhost:5000/callback'
 AUTH_URL = 'https://login.xero.com/identity/connect/authorize'
 TOKEN_URL = 'https://identity.xero.com/connect/token'
 RESOURCE_URL = 'https://api.xero.com/api.xro/2.0/Invoices'  # Example resource
+
+ACTIVE_COMPANY = app.config["ACTIVE_COMPANY"]
+
+
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 
@@ -114,6 +118,7 @@ def oauth_callback():
     store_xero_oauth2_token(response)
     return "Sucessfully authorized with Xero!"
 
+
 def get_xero_tenant_id():
     
     global g_token
@@ -123,7 +128,7 @@ def get_xero_tenant_id():
     response = requests.get("https://api.xero.com/connections", headers=headers)
     connections = response.json()
     for connection in connections:
-        if connection["tenantType"] == "ORGANISATION":
+        if connection["tenantType"] == "ORGANISATION" and connection["tenantName"] == ACTIVE_COMPANY:
             return connection["tenantId"]
 
 
@@ -138,6 +143,91 @@ def get_invoices():
     response = requests.get(RESOURCE_URL, headers=headers)
     return response.json()
 
+import json
+
+def get_accounts():
+    global g_token
+    access_token = g_token["access_token"]
+
+    xero_tenant_id = get_xero_tenant_id()
+
+    headers = {'Authorization': f'Bearer {access_token}', "Xero-tenant-id": xero_tenant_id, 'Accept': 'application/json'}
+    response = requests.get('https://api.xero.com/api.xro/2.0/Accounts', headers=headers)
+    return response.json()
+
+def change_invoice_status(invoice_id, status):
+    """Makes an API request to change invoice status"""
+    global g_token
+    access_token = g_token["access_token"]
+
+    xero_tenant_id = get_xero_tenant_id()
+    data = {'status': status}  # Adjust the payload as per the API's requirements
+
+    headers = {'Authorization': f'Bearer {access_token}', "Xero-tenant-id": xero_tenant_id, 'Accept': 'application/json'}
+    response = requests.post(RESOURCE_URL + f'/{invoice_id}', headers=headers, json=data)
+
+    try:
+        response.raise_for_status()
+        return response.json()  # Return the response data
+    except requests.exceptions.HTTPError as err:
+        return {'error': str(err)}  # Handle HTTP errors
+
+    return response.json()
+
+
+def pay_invoice(invoice_id, date, amount, account_code, reference = "Payment made via API"):
+
+    """Makes an API request to change invoice status"""
+    global g_token
+    access_token = g_token["access_token"]
+
+    xero_tenant_id = get_xero_tenant_id()
+    payment = {
+        "Invoice": { "InvoiceID": invoice_id },
+        "Amount": amount,
+        "Date": date,
+        "Reference": reference,
+        "Account": {
+            "Code": account_code # directors loan
+        },
+        "Status": "PAID"
+    }
+
+    headers = {'Authorization': f'Bearer {access_token}', "Xero-tenant-id": xero_tenant_id, 'Accept': 'application/json'}
+    response = requests.put('https://api.xero.com/api.xro/2.0/Payments', headers=headers, json=payment)
+
+    try:
+        response.raise_for_status()
+        return response.json()  # Return the response data
+    except requests.exceptions.HTTPError as err:
+        print( response.text )
+        return {'error': str(err)}  # Handle HTTP errors
+
+    return response.json()
+
+import re
+from datetime import datetime
+
+def convert_date( date ):
+
+    # Use regular expression to extract the timestamp
+    match = re.search(r'(\d+)', date)
+    if match:
+        timestamp_ms = int(match.group(1))  # Convert the extracted part to an integer
+
+        # Convert milliseconds to seconds
+        timestamp_s = timestamp_ms / 1000
+
+        # Convert UNIX timestamp to datetime object
+        date_time = datetime.utcfromtimestamp(timestamp_s)
+
+        # Format the datetime object to YYYY-MM-DD
+        formatted_date = date_time.strftime('%Y-%m-%d')
+
+        print(formatted_date)
+        return formatted_date
+    else:
+        raise("No valid timestamp found in the string.")
 
 if __name__ == '__main__':
     # Start the Flask server in a separate process
@@ -159,16 +249,41 @@ if __name__ == '__main__':
 
         time.sleep(0.2)
    
-        
-
 
     # Making an API request
+
+    accounts = get_accounts()
+    for account in accounts["Accounts"]:
+        print( account )
+
+
     try:
         invoices = get_invoices()
 
     except Exception as e:
         print('Error making API request:', e)
-
+    
+    
     for invoice in invoices["Invoices"]:
-        print(invoice['Type'], invoice["InvoiceNumber"], invoice["Total"])
+        if invoice['Type'] != 'ACCPAY':
+            continue
+        
+        
+        skip = ['PAID', 'VOIDED', 'DELETED', 'DRAFT', 'SUBMITTED' ]
+        if invoice['Status'] in skip:
+            continue
+
+        print( invoice['Contact']['Name'], invoice['Status'], invoice['DueDate'], invoice['Total']) 
+        if not invoice['Contact']['Name'].startswith( 'Adobe'):
+            continue
+        response = input( "pay?")
+
+        if response == 'y':
+            ## make a payment
+            print( "paying")
+            pay_invoice(invoice['InvoiceID'], convert_date(invoice['DueDate']), invoice['Total'], '835', 'HSBC' )
+            print( "paid")
+
+
+
 
